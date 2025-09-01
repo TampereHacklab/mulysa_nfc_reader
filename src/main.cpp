@@ -27,8 +27,8 @@
 // for talking with the server
 #include <HTTPClient.h>
 
-// display
-#include <U8g2lib.h>
+// Neopixel
+#include <Adafruit_NeoPixel.h>
 
 // Let's Encrypt ISRG Root X1
 // valid untill 6/4/35, 2:04:38 PM GMT+3
@@ -82,28 +82,29 @@ PN532 nfc(pn532spi);
 // our chipid
 String chipId = String((uint32_t)ESP.getEfuseMac(), HEX);
 
-// display (nokia 5110 PCD8544)
-U8G2_PCD8544_84X48_1_4W_SW_SPI u8g2(U8G2_R2, /* clock=*/13, /* data=*/15, /* cs=*/16, /* dc=*/2, /* reset=*/4);
+// NeoPixel (NOTE! This runs in its own core!)
+TaskHandle_t NeoPixelTaskHandle; // This is so we can control the neopixel seperatly
 
-#define trehacklablogow 29
-#define trehacklablogoh 48
-static unsigned char trehacklablogo[] = {
-    0x80, 0xff, 0xff, 0x1f, 0x80, 0xff, 0xff, 0x1f, 0x80, 0xff, 0xff, 0x1f,
-    0x80, 0xff, 0xff, 0x1f, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0xff, 0xff, 0x03, 0x1e,
-    0xff, 0xff, 0x03, 0x1e, 0xff, 0xff, 0x03, 0x1e, 0xff, 0xff, 0x03, 0x1e,
-    0x00, 0x00, 0x00, 0x1e, 0xfc, 0xff, 0x00, 0x1e, 0xfc, 0xff, 0x00, 0x1e,
-    0xfc, 0xff, 0x00, 0x1e, 0xfc, 0xff, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e,
-    0x80, 0x07, 0x00, 0x1e, 0x80, 0x07, 0x00, 0x1e, 0x80, 0xff, 0xff, 0x1f,
-    0x80, 0xff, 0xff, 0x1f, 0x80, 0xff, 0xff, 0x1f, 0x80, 0xff, 0xff, 0x1f};
+#define PIXEL_PIN   4 // Digital IO pin connected to the NeoPixels.
+#define PIXEL_COUNT 1 // Number of NeoPixels
+
+// Declare our NeoPixel strip object:
+Adafruit_NeoPixel strip(PIXEL_COUNT, PIXEL_PIN, NEO_GRB );
+
+// NeoPixelState enum
+enum NeoPixelStates{
+  IDLE          = 0,
+  CARDREAD      = 1,
+  ACCESSGRANTED = 2,
+  ACCESSDENIED  = 3,
+  ERROR         = 4
+};
+
+// For animating the CARDREAD state
+uint delaytime = 250;
+unsigned long changetime = 0;
+bool BlinkState = false;
+byte NeoPixelState = IDLE;
 
 // callback for saving the config
 void configModeCallback(WiFiManager *wifiManager)
@@ -135,12 +136,16 @@ void writeConfig(String json)
 
 void readConfig()
 {
+  Serial.println("Reading config...");
   File configFile = SPIFFS.open("/config.json", "r");
   if (!configFile)
   {
     Serial.println("could not read the config file, resetting");
     resetSettings();
+  }else{
+    Serial.println("Success!");
   }
+
   size_t size = configFile.size();
   std::unique_ptr<char[]> buf(new char[size]);
 
@@ -153,71 +158,71 @@ void readConfig()
   }
 
   strcpy(endpoint, doc["endpoint"]);
+  Serial.print("Read endpoint:");
+  Serial.println(endpoint);
   configFile.close();
 }
 
-void drawIdleScreen()
-{
-  // idle screen
-  u8g2.firstPage();
-  do
+
+void neoPixelControl(byte state){
+  switch (state)
   {
-    u8g2.drawXBM(5, 0, trehacklablogow, trehacklablogoh, trehacklablogo);
-    u8g2.setFont(u8g2_font_tenfatguys_tf);
-    u8g2.drawStr(40, 20, "TRE");
-    u8g2.drawStr(40, 40, "NFC");
-  } while (u8g2.nextPage());
+    case IDLE:
+      strip.setBrightness(25);
+      strip.setPixelColor(0,255,255,255);
+      break;
+    
+    case CARDREAD:
+      strip.setBrightness(127);
+      if (changetime < millis()){
+        BlinkState = !BlinkState;
+        changetime = millis() + delaytime;
+      }
+
+      if (BlinkState) {
+        strip.setPixelColor(0,255,255,255);
+      }else{
+        strip.setPixelColor(0,0,0,0);
+      }
+
+    break;
+
+    case ACCESSGRANTED:
+      strip.setBrightness(255);
+      strip.setPixelColor(0,0,0,255);
+      break;
+
+    case ACCESSDENIED:
+      strip.setBrightness(255);
+      strip.setPixelColor(0,255,0,0);
+      break;
+
+    case ERROR:
+      strip.setBrightness(127);
+      if (changetime < millis()){
+        BlinkState = !BlinkState;
+        changetime = millis() + delaytime;
+      }
+
+      if (BlinkState) {
+        strip.setPixelColor(0,255,0,0);
+      }else{
+        strip.setPixelColor(0,0,0,0);
+      }
+      break;
+
+    default:
+      break;
+  }
+  
+  strip.show();
 }
 
-void drawStartupScreen()
-{
-  // idle screen
-  u8g2.firstPage();
-  do
-  {
-    u8g2.drawXBM(5, 0, trehacklablogow, trehacklablogoh, trehacklablogo);
-    u8g2.setFont(u8g2_font_tenfatguys_tf);
-    u8g2.drawStr(40, 20, "Please");
-    u8g2.drawStr(40, 40, "Wait");
-  } while (u8g2.nextPage());
-}
-
-void drawErrorScreen(String errmsg)
-{
-  u8g2.firstPage();
-  do
-  {
-    u8g2.drawXBM(5, 0, trehacklablogow, trehacklablogoh, trehacklablogo);
-    u8g2.setFont(u8g2_font_tenfatguys_tf);
-    u8g2.drawStr(40, 20, "Error");
-    u8g2.setCursor(40, 40);
-    u8g2.print(errmsg);
-  } while (u8g2.nextPage());
-}
-
-void drawCardRead(String cardid)
-{
-  u8g2.firstPage();
-  do
-  {
-    u8g2.setFont(u8g2_font_tenfatguys_tf);
-    u8g2.drawStr(0, 20, "Card:");
-    u8g2.setFont(u8g2_font_t0_11_tf);
-    u8g2.setCursor(0, 40);
-    u8g2.print(cardid);
-  } while (u8g2.nextPage());
-}
-
-void drawWelcome(String name)
-{
-  u8g2.firstPage();
-  do
-  {
-    u8g2.setFont(u8g2_font_tenfatguys_tf);
-    u8g2.drawStr(10, 20, "Welcome");
-    u8g2.setCursor(10, 40);
-    u8g2.print(name);
-  } while (u8g2.nextPage());
+void NeoPixelCode( void * pvParameters ){
+  for(;;){
+    neoPixelControl(NeoPixelState);
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 void setup()
@@ -225,8 +230,16 @@ void setup()
   Serial.begin(115200);
   Serial.println("Starting up");
 
-  u8g2.begin();
-  drawStartupScreen();
+  // Setup the second core for the neopixel
+  xTaskCreatePinnedToCore(
+    NeoPixelCode,         /* Task function. */
+    "NeoPixelTask",       /* name of task. */
+    10000,                /* Stack size of task */
+    NULL,                 /* parameter of the task */
+    1,                    /* priority of the task */
+    &NeoPixelTaskHandle,  /* Task handle to keep track of created task */
+    0);                   /* pin task to core 0 */                  
+  delay(500); 
 
   pinMode(RESET_SETTINGS_PIN, INPUT_PULLUP);
   pinMode(RELAY_PIN, OUTPUT);
@@ -235,8 +248,8 @@ void setup()
   uint32_t versiondata = nfc.getFirmwareVersion();
   if (!versiondata)
   {
+    NeoPixelState = ERROR;
     Serial.print("Didn't find PN53x board check connections, halting");
-    drawErrorScreen("noreader");
     while (1)
     {
       delay(10);
@@ -264,8 +277,8 @@ void setup()
 
   if (!SPIFFS.begin(true))
   {
+    NeoPixelState = ERROR;
     Serial.println("Failed to start or format SPIFFS, freezing");
-    drawErrorScreen("SPIFFS");
     while (1)
     {
       delay(10);
@@ -305,12 +318,11 @@ void setup()
 
 void loop(void)
 {
-  // show our idle screen
-  drawIdleScreen();
-
   boolean cardRead;
   uint8_t cardUID[] = {0, 0, 0, 0, 0, 0, 0}; // Buffer to store the returned cardUID
   uint8_t cardUIDLength;                     // Length of the cardUID (4 or 7 bytes depending on ISO14443A card type)
+
+  NeoPixelState = IDLE;
 
   // Wait for an ISO14443A type cards (Mifare, etc.).  When one is found
   // 'cardUID' will be populated with the cardUID, and cardUIDLength will indicate
@@ -319,6 +331,7 @@ void loop(void)
 
   if (cardRead)
   {
+    NeoPixelState = CARDREAD;
     Serial.print("Card with cardUID value: ");
     Serial.print("0x");
     for (uint8_t i = 0; i < cardUIDLength; i++)
@@ -327,7 +340,7 @@ void loop(void)
     }
     Serial.println("");
 
-    // Wait until the card is taken away
+    // Wait until the card is taken away (Might not do anything right now?)
     while (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &cardUID[0], &cardUIDLength))
     {
     }
@@ -354,8 +367,6 @@ void loop(void)
     payload.concat(cardid);
     payload.concat("\"}");
 
-    drawCardRead(cardid);
-
     Serial.print("request data: ");
     Serial.println(payload);
 
@@ -365,7 +376,7 @@ void loop(void)
     if (httpCode == 200)
     {
       Serial.println("access granted");
-      drawWelcome("TempName");
+      NeoPixelState = ACCESSGRANTED;
       digitalWrite(RELAY_PIN, HIGH);
       // TODO: make this without delay :)
       delay(30*1000);
@@ -373,10 +384,13 @@ void loop(void)
     }
     else
     {
-      drawIdleScreen();
       Serial.println("access denied");
+      NeoPixelState = ACCESSDENIED;
     }
     http.end();
+
+    // Little delay for the neopixel
+    delay(1000);
   }
   else
   {
